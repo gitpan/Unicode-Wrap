@@ -10,3 +10,10 @@ Revision history for Perl extension Unicode::Wrap.
 	- Text::Wrap-style interface replaces interface in 0.01
 	- Explicit 'break_lines' function to do the meat of the work
        
+0.03  Tue Apr  8 22:19:09 CDT 2003
+	- Text::Wrap-style interface removed (belongs someplace like Text::Wrap)
+	- New test cases should test nearly every LB rule defined in UAX#14
+	- New property lookup code should be a little faster
+	- Bug fixes
+	- Completely different interface (sorry), should be easier to adapt to wider range of tasks
+	- Added dependency on 5.8, since unicore isn't available in 5.6

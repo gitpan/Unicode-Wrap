@@ -3,4 +3,6 @@ Makefile.PL
 MANIFEST
 README
 Wrap.pm
-t/1.t
+t/00basic.t
+t/classifications.t
+t/lb-rules.t
