@@ -4,3 +4,9 @@ Revision history for Perl extension Unicode::Wrap.
 	- original version; created by h2xs 1.22 with options
 		-n Unicode::Wrap -X -b 5.6.0
 
+0.02  Sun Apr  6 15:15:04 CDT 2003
+	- Better integration with Perl's built-in Unicode system
+	- Now uses unicore/Lbrk.pl for property mappings
+	- Text::Wrap-style interface replaces interface in 0.01
+	- Explicit 'break_lines' function to do the meat of the work
+       

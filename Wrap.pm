@@ -1,52 +1,21 @@
 package Unicode::Wrap;
 
-use 5.006;
-use strict;
-use warnings;
-
-our $VERSION = '0.01';
-
 # Implements UAX#14: Line Breaking Properties
 # David Nesting <david@fastolfe.net>
 
+use 5.006;
+use strict;
+use warnings;
+use base 'Exporter';
+
+use Unicode::UCD;
+use Carp;
+
+our $VERSION = '0.02';
+our @EXPORT_OK = qw/ rewrap wrap break_lines classify /;
+
 our $DEBUG = 0;
-
-sub new {
-	my $pkg = shift;
-	my $self = { @_ };
-	bless($self, ref($pkg) || $pkg);
-}
-
-sub wrap {
-	my $self = shift;
-
-	if (wantarray) {
-		map { $self->_wrap($self->prepare($_, "\n")) } @_;
-	} else {
-		$self->_wrap($self->prepare(shift(), "\n"));
-	}
-}
-
-sub rewrap {
-	my $self = shift;
-
-	if (wantarray) {
-		map { $self->_wrap($self->prepare($_, " ")) } @_;
-	} else {
-		$self->_wrap($self->prepare(shift(), " "));
-	}
-}
-
-# Normalize newlines
-sub prepare {
-	my ($self, $text, $to_what) = @_;
-
-	$to_what = "\n" unless defined $to_what;
-
-	$text =~ s/\012\010|\012|\010|\N{U+2028}/$to_what/g;
-
-	return $text;
-}
+our $columns = 75;
 
 use constant      AFTER => 1;
 use constant  NOT_AFTER => 2;
@@ -88,6 +57,77 @@ my %BREAK_RULE = (
 	ZW => AFTER,
 );
 
+my $procedural_self;
+my %classified;
+my $txt;
+
+sub new {
+	my $pkg = shift;
+	my $self = { @_ };
+	$self->{line_length} ||= $columns;
+	
+	bless($self, ref($pkg) || $pkg);
+}
+
+sub self {
+#	unless ($procedural_self) {
+#		$procedural_self = __PACKAGE__->new(
+#			line_length => $columns,
+#			emergency_break => $columns,
+#		);
+#	}
+#	$procedural_self;
+	__PACKAGE__->new(
+		line_length => $columns,
+		emergency_break => $columns,
+	);
+}
+
+sub wrap {
+	my $self = ref($_[0]) ? shift() : self();
+	my ($initial, $subsequent, $text) = @_;
+
+	if (length $initial) {
+		foreach (split(//, $initial)) {
+			$self->{_add_to_first} += $self->length_of($_, $self->classify($_));
+		}
+		carp "Initial line prefix is longer than allowed line length"
+			if $self->{_add_to_first} > $self->{line_length};
+	}
+
+	if (length $subsequent) {
+		foreach (split(//, $subsequent)) {
+			$self->{_add_to_subsequent} += $self->length_of($_, $self->classify($_));
+		}
+		carp "Subsequent line prefix is longer than allowed line length"
+			if $self->{_add_to_subsequent} > $self->{line_length};
+	}
+
+	my @lines = $self->break_lines($text);
+	delete $self->{_add_to_first};
+	delete $self->{_add_to_subsequent};
+
+	for (my $i = 0; $i <= $#lines; $i++) {
+		unless ($i) {
+			$lines[$i] = "$initial$lines[$i]";
+		} else {
+			$lines[$i] = "$subsequent$lines[$i]";
+		}
+	}
+
+	return join("", map { s/\s*$//; "$_\n" } @lines);
+}
+
+sub rewrap {
+	my $self = ref($_[0]) ? shift() : self();
+	my $text = shift;
+
+	$text =~ s/\012\010|\012|\010|\N{U+2028}/\n/g;
+	$text =~ s/\n\s*/ /g;
+	
+	$self->wrap(@_[0, 1], $text);
+}
+
 # This attempts to identify the on-screen length of a given character.
 # For normal displays, you can generally assume the character has a
 # length of 1, but some terminals may expand the width of certain
@@ -115,15 +155,66 @@ sub length_of {
 	return 1;
 }
 
-sub _wrap {
-	my ($self, $text) = @_;
+sub classify {
+	my ($self, $code);
+
+	if (ref($_[0])) {
+		$self = $_[0];
+		$code = Unicode::UCD::_getcode(ord $_[1]);
+	} else {
+		$code = Unicode::UCD::_getcode(ord $_[0]);
+	}
+
+	my $hex;
+
+	if (defined $code) {
+		$hex = sprintf "%04X", $code;
+	} else {
+		carp("unexpected arg \"$_[1]\" to Text::Wrap::classify()");
+		return;
+	}
+
+	if ($self) {
+		if (ref($self->{classify}) eq 'HASH') {
+			return $self->{classify}->{$code} if exists $self->{classify}->{$code};
+		} elsif (ref($self->{classify}) eq 'CODE') {
+			my $t = $self->{classify}->($self, $code);
+			return $t if defined $t;
+		}
+	}
+
+	return $classified{$hex} if $classified{$hex};
+
+	$txt = do "unicore/Lbrk.pl" unless $txt;
+
+	if ($txt =~ m/^$hex\t\t(.+)/m) {
+		print STDERR "< found direct match for $hex = $1 >\n" if $DEBUG > 1;
+		return $classified{$hex} = $1;
+	} else {
+		print STDERR "< no direct match $hex >\n" if $DEBUG > 1;
+		pos($txt) = 0;
+
+		while ($txt =~ m/^([0-9A-F]+)\t([0-9A-F]*)\t(.+)/mg) {
+			print STDERR "< examining $1 -> $2 >\n" if $DEBUG > 1;
+			if (defined($2) && hex($1) < $code && hex($2) >= $code) {
+				print STDERR "< found range match for $hex = $3 between $1 and $2 >\n" if $DEBUG > 1;
+				return $classified{$hex} = $3;
+			}
+		}
+		return 'XX';
+	}
+}
+
+sub break_lines {
+	my $self = ref($_[0]) ? shift() : self();
+	my $text = shift;
 
 	no warnings 'uninitialized';	# since we do a lot of subscript +/- 1 checks
 
 	my @break_at;
 
 	my @characters = split(//, $text);
-	my @classifications = map { classify_character($_) } @characters;
+	my @classifications = map { $self->classify($_) } @characters;
 
 	# Fix up the classifications so that a HY (hyphen) class becomes a BA
 	# class if it occurs between two alphabetic characters, since this usually
@@ -174,7 +265,11 @@ sub _wrap {
 
 		my $length = $self->length_of($characters[$i], $classifications[$i]);
 
-		if ($pos + $length >= $self->{line_length} || $rules[$i] & REQUIRED) {
+		if (($pos + $length > 
+			$self->{line_length} - 
+			(@break_at ? $self->{_add_to_subsequent} : $self->{_add_to_first}))
+			|| $rules[$i] & REQUIRED) 
+		{
 			if ($classifications[$i] ne 'SP') {
 				print STDERR ", want to break at $i" if $DEBUG;
 				if ($last_break) {
@@ -206,18 +301,21 @@ sub _wrap {
 	push(@break_at, length($text)) unless $break_at[$#break_at] == length($text);
 
 	$pos = 0;
+	my @result;
 	foreach (@break_at) {
-		substr($text, $_ + $pos, 0) = "\n";
-		$pos++;
+		push(@result, substr($text, $pos, $_ - $pos));
+		$pos = $_;
 	}
-
-	return $text;
+	return @result;
 }
 
-# Here is where a character gets classified into a UNICODE character
+# Here is where a character gets classified into a Unicode character
 # class.  This method is fairly inefficient.
-	
-sub classify_character {
+#
+# THIS METHOD IS NO LONGER USED, but preserved in case it might be useful.
+# Instead, we rely on unicore/Lbrk.pl to define these mappings for us.
+
+sub classify_character_manually {
 	local($_) = $_[0];
 	my $ord = ord($_);
 
@@ -368,7 +466,7 @@ sub classify_character {
 	return 'SY' if $ord == 0x002f;
 
 	# XX - Unknown
-	return 'XX' if
+	return 'XX2' if
 		/^[\p{Co}\p{Cn}]$/;
 
 	# ZW - Zero Width Space
@@ -391,9 +489,11 @@ sub classify_character {
 	# AL - Ordinary Alphabetic and Symbol Characters	
 	return 'AL' if /^\p{L}$/ || /^[\p{Sm}\p{Sk}\p{So}]/;
 
-	return 'XX';  # fall back?
+	return 'XX3';  # fall back?
 }
 
+1;
+		
 __END__
 
 =head1 NAME
@@ -405,15 +505,22 @@ Unicode::Wrap - Unicode Line Breaking
   use Unicode::Wrap;
 
   my $wrapper = new Unicode::Wrap( line_length => 75 );
-  my $text = $wrapper->wrap($long_string);	# Unwrapped string
-  my $text = $wrapper->rewrap($long_string);	# Remove newlines first
+  my @lines = $wrapper->break_lines($long_string);
+  my $text  = $wrapper->wrap("  ", "", $long_string);
+  my $text  = $wrapper->rewrap("", "", $text);
+
+  use Unicode::Wrap qw/ break_lines wrap /;
+  $Unicode::Wrap::columns = 75;
+  my @lines = break_lines($long_string);
+  my $text = wrap("  ", "", $long_string);
 
 =head1 ABSTRACT
 
 This module implements UAX#14: Line Breaking Properties.  It goes
 through a text string, classifies each character and computes a
-length for each.  When the line gets too long, a break is inserted
-where appropriate.
+length for each.  When the line gets too long, it's separated.
+Some Text::Wrap-style functions are also provided to do some simple
+text wrapping.
 
 =head1 DESCRIPTION
 
@@ -452,19 +559,46 @@ unit.
 This may also contain a simple hashref, keyed on the character, with
 values consisting of the length of that character.
 
+In theory, this could be used to estimate the number of pixels each
+character would consume, using a variable-width font.  You could then
+wrap based on the number of pixels and not just the number of characters.
+
+=item classify
+
+If you wish to override the module's default classification method, you
+can either set this to be a hashref of direct mappings, or a coderef,
+which will be called (@_ = ($self, $code)) to determine the line breaking
+classification of that character.  This function can return undef if you
+wish to defer to the default classification system for that lookup.
+
 =back
 
-=item wrap($text, ...)
+The next may be called either as object methods, or as functions:
+
+=item break_lines($text, ...)
+
+This will break C<$text> up into individual lines.  Newlines are preserved
+but none will be added.  Use this if you need an implementation of UAX#14
+that just breaks lines up without re-assembling them into a text string.
+
+=item wrap($initial_whitespace, $subsequent_whitespace, $text)
 
 This will take a chunk of text, normalize the newlines (but preserve them)
-and attempt to wrap it per UAX#14.  More than one block of text can be
-wrapped, but each block is wrapped independently from the previous.
+and attempt to wrap it per UAX#14 in the style of Text::Wrap.  The difference
+here is that only one chunk of text can be wrapped at a time.
 
-=item rewrap($text, ...)
+=item rewrap($initial, $subsequent, $text)
 
 This does the same thing as C<wrap>, except that newlines are normalized
 to spaces before wrapping.  This might be used if you already have a
 paragraph of text that you want to re-wrap.
+
+=item classify($character)
+
+Returns the Line Breaking classification of the character passed.
+
+  print classify("a");		# AL
+  print $self->classify("5");	# NU, unless $self->{classify} overrides
 
 =back
 
@@ -472,11 +606,8 @@ paragraph of text that you want to re-wrap.
 
 =over 4
 
-=item This module is slow.  It's a pure-Perl implementation that goes through
+=item This module can be slow.  It's a pure-Perl implementation that goes through
 an expensive classification process per character.
-
-=item Some classification rules may not be complete.  These are noted with
-'TODO' in the code.
 
 =item Combining Marks should "inherit" the breaking properties of the character
 they're being combined with, so that if a character normally allows a break
@@ -494,6 +625,8 @@ the break can occur after the combined result.
 =item http://www.unicode.org/reports/tr14/
 
 Unicode Standard Annex #14: Line Breaking Properties
+
+=item L<Text::Wrap>, L<unicode>
 
 =back
 
