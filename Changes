@@ -1,0 +1,6 @@
+Revision history for Perl extension Unicode::Wrap.
+
+0.01  Sat Apr  5 13:28:06 2003
+	- original version; created by h2xs 1.22 with options
+		-n Unicode::Wrap -X -b 5.6.0
+
